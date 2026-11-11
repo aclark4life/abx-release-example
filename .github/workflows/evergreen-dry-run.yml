@@ -1,0 +1,174 @@
+# Exercise the Evergreen scripts without Evergreen, AWS, or the containers.
+#
+# Evergreen built-ins cannot run here. This workflow simulates them:
+#
+#   - fetch abx-release-tools: the clone-and-checkout step below.
+#   - ec2.assume_role: dummy session credentials in the environment.
+#   - expansions.update: the scripts write the file directly.
+#   - papertrail.trace: the final step checks the exact inputs the command
+#     would receive. It does not call Papertrail.
+#
+# ECR login, SilkBomb, and Garasign use the stubs in .github/scripts.
+# The scripts themselves run unchanged.
+name: Evergreen dry run
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ABX_RELEASE_TOOLS_REF: 9d8e5070f37497b4d2d0239c80d65eacc096fdbc
+  PRODUCT: abx-release-example-dev
+  BRANCH_NAME: main
+
+jobs:
+  dry-run:
+    name: Dry run
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # evergreen/fetch.yml
+      - name: Fetch abx-release-tools
+        run: |
+          set -euo pipefail
+          rm -rf abx-release-tools
+          git clone -q https://github.com/mongodb-labs/abx-release-tools.git
+          git -C abx-release-tools checkout -q "$ABX_RELEASE_TOOLS_REF"
+
+      # release-version.sh derives the version from the tag.
+      - name: Tag the test version
+        run: git tag -f v0.1.0
+
+      - name: Build the distributions
+        run: |
+          pip install build
+          python -m build
+
+      - name: Install the stubs
+        run: |
+          set -euo pipefail
+          stub_dir="$RUNNER_TEMP/stub-bin"
+          mkdir -p "$stub_dir"
+          cp .github/scripts/docker .github/scripts/aws "$stub_dir/"
+          chmod +x "$stub_dir/docker" "$stub_dir/aws"
+          echo "$stub_dir" >> "$GITHUB_PATH"
+
+      # evergreen/silkbomb.yml: generate_sbom
+      - name: Generate the SBOM
+        env:
+          SBOM_SOURCE: requirements
+          SBOM_SOURCE_ARG: requirements.txt
+        run: bash abx-release-tools/scripts/generate-sbom.sh
+
+      # evergreen/silkbomb.yml and evergreen/sign_artifacts.yml:
+      # ec2.assume_role sets these in Evergreen.
+      - name: Log in to ECR
+        env:
+          AWS_ACCESS_KEY_ID: stub
+          AWS_SECRET_ACCESS_KEY: stub
+          AWS_SESSION_TOKEN: stub
+        run: bash abx-release-tools/evergreen/ecr-login.sh
+
+      # evergreen/silkbomb.yml: upload_sbom
+      - name: Upload the SBOM
+        env:
+          AWS_ACCESS_KEY_ID: stub
+          AWS_SECRET_ACCESS_KEY: stub
+          AWS_SESSION_TOKEN: stub
+          KONDUKTO_REPO: aclark4life/abx-release-example
+          KONDUKTO_BRANCH: ${{ env.BRANCH_NAME }}
+        run: bash abx-release-tools/evergreen/upload-sbom.sh
+
+      # evergreen/sign_artifacts.yml calls the function once per artifact.
+      - name: Sign the artifacts
+        env:
+          GARASIGN_USERNAME: stub
+          GARASIGN_PASSWORD: stub
+          GPG_KEY_ID: stub-key
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for artifact in dist/*.whl dist/*.tar.gz; do
+            UNSIGNED_ARTIFACT="$artifact" \
+              DETACHED_SIGNATURE="$artifact.sig" \
+              bash abx-release-tools/evergreen/sign-artifact.sh
+          done
+
+      # evergreen/papertrail.yml: the shell part.
+      - name: Derive the release version
+        run: bash abx-release-tools/evergreen/release-version.sh
+
+      # evergreen/papertrail.yml: the inputs to papertrail.trace.
+      - name: Collect the trace inputs
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          files=()
+          for pattern in 'dist/*.whl' 'dist/*.tar.gz' 'dist/*.sig'; do
+            # shellcheck disable=SC2206  # deliberate: this is the glob expansion
+            matches=($pattern)
+            if [ "${#matches[@]}" -eq 0 ]; then
+              echo "::error::no file matches $pattern"
+              exit 1
+            fi
+            files+=("${matches[@]}")
+          done
+
+          # papertrail.trace rejects two files with the same name.
+          names=()
+          for file in "${files[@]}"; do
+            names+=("$(basename "$file")")
+          done
+          duplicates=$(printf '%s\n' "${names[@]}" | sort | uniq -d)
+          if [ -n "$duplicates" ]; then
+            echo "::error::duplicate file names: $duplicates"
+            exit 1
+          fi
+
+          printf '%s\n' "${files[@]}" > "$RUNNER_TEMP/trace-files.txt"
+
+      - name: Verify the dry run
+        run: |
+          set -euo pipefail
+
+          test -s sbom.json
+          test -s trace-expansions.yml
+          grep -q '^release_version: "0.1.0"$' trace-expansions.yml
+
+          for artifact in dist/*.whl dist/*.tar.gz; do
+            test -s "$artifact.sig"
+          done
+
+          trace_count=$(wc -l < "$RUNNER_TEMP/trace-files.txt")
+          signatures=$(find dist -maxdepth 1 -name '*.sig' | wc -l)
+          test "$trace_count" -eq $((signatures + 2))
+
+          {
+            echo "## Evergreen dry run passed"
+            echo ""
+            echo "- SBOM generated from requirements.txt"
+            echo "- ECR login and SilkBomb upload used stub credentials"
+            echo "- $signatures artifact(s) signed with placeholder signatures"
+            echo "- release_version is 0.1.0"
+            echo "- $trace_count trace input(s), with unique names"
+            echo "- papertrail.trace was not called"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: evergreen-dry-run-output
+          path: |
+            sbom.json
+            trace-expansions.yml
+            dist/
+            ${{ runner.temp }}/trace-files.txt

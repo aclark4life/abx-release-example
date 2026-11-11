@@ -20,6 +20,7 @@ gives.
 | `release.yml` | Manual dispatch | `setup`, `python/generate-sbom`, `sbom`, `gpg-sign`, `authorized-pub`, `upload-s3-assets`, `python/publish` | Yes |
 | `sign-tag.yml` | Manual dispatch | `setup`, `git-sign` | Yes |
 | `release-dry-run.yml` | Manual dispatch | `python/generate-sbom`, `sbom`, `gpg-sign`, `authorized-pub`, `upload-s3-assets` with stubs | No |
+| `evergreen-dry-run.yml` | Manual dispatch | Evergreen scripts with stubbed built-ins and containers | No |
 
 `ci.yml` runs the tests on Python 3.10 to 3.13, builds the
 distributions, and generates `sbom.json`. It runs without secrets.
@@ -111,6 +112,31 @@ It does not test `setup`, the real containers, AWS, S3, or publishing.
 gh workflow run release-dry-run.yml
 ```
 
+## Evergreen dry run
+
+`evergreen-dry-run.yml` runs the scripts under `evergreen/` without
+Evergreen, AWS, or the containers.
+
+It simulates the Evergreen built-ins:
+
+- `fetch abx-release-tools`: the workflow clones the tools repo at the
+  pinned SHA.
+- `ec2.assume_role`: dummy session credentials in the environment.
+- `expansions.update`: `release-version.sh` writes the file directly.
+- `papertrail.trace`: the workflow checks the version and the exact file
+  list the command would receive.
+
+The stubs in `.github/scripts` replace ECR login, SilkBomb, and Garasign.
+The scripts run unchanged: `generate-sbom.sh`, `ecr-login.sh`,
+`upload-sbom.sh`, `sign-artifact.sh`, and `release-version.sh`.
+
+It does not test Evergreen itself, `papertrail.trace`, AWS, or real
+signing.
+
+```shell
+gh workflow run evergreen-dry-run.yml
+```
+
 ## Layout
 
 ```
@@ -118,8 +144,8 @@ src/abx_example/       The package
 tests/                 The tests
 requirements.txt       Pinned release dependencies; the SBOM input
 pyproject.toml         Package metadata
-.github/workflows/     CI, release, tag signing, and the dry run
-.github/scripts/docker Stub containers for the dry run
+.github/workflows/     CI, release, tag signing, and the dry runs
+.github/scripts/       Stub docker and AWS CLI for the dry runs
 ```
 
 ## Notes

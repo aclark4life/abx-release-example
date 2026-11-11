@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Stub AWS CLI for the Evergreen dry run. The only call is the ECR password
+# that ecr-login.sh pipes into `docker login`.
+set -euo pipefail
+
+if [ "${1:-}" = "ecr" ] && [ "${2:-}" = "get-login-password" ]; then
+  echo "stub-ecr-password"
+  exit 0
+fi
+
+echo "aws stub: unsupported command: $*" >&2
+exit 1

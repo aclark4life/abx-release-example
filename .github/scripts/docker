@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
-# Stub docker for the release dry run. It stands in for the two containers the
-# actions use:
+# Stub docker for the release and Evergreen dry runs. It stands in for the
+# containers the tools use:
 #
-#   - SilkBomb: `update` copies the input SBOM to the output path. `augment`
-#     checks that the SBOM exists. It does not contact Kondukto.
-#   - Garasign: reads the NUL-delimited file list on stdin and writes a
-#     placeholder `.sig` file for each name. It does not sign anything.
+#   - ECR login: consumes the password and reports success.
+#   - SilkBomb `update`: copies the input SBOM to the output path.
+#   - SilkBomb `augment`: checks that the SBOM exists.
+#   - SilkBomb `upload`: checks the repository, branch, and SBOM path.
+#   - Garasign: writes a placeholder signature. The GitHub action sends the
+#     file list on stdin; the Evergreen script passes it as positional
+#     arguments.
 #
-# Any other container is an error: the dry run must not silently pass a step
-# it cannot simulate.
+# Any other container is an error: a dry run must not silently pass a step it
+# cannot simulate.
 set -euo pipefail
 
 die() {
@@ -16,30 +19,65 @@ die() {
   exit 1
 }
 
-[ "${1:-}" = "run" ] || die "unsupported command: ${1:-}"
+command="${1:-}"
+[ -n "$command" ] || die "no command"
 shift
 
+if [ "$command" = "login" ]; then
+  cat >/dev/null || true
+  echo "docker stub: login succeeded"
+  exit 0
+fi
+
+[ "$command" = "run" ] || die "unsupported command: $command"
+
+declare -A mounts=()
 mode=""
 sbom_in=""
 sbom_out=""
+repo=""
+branch=""
+sign_base=""
 
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
   case "${args[$i]}" in
-    update | augment) mode="${args[$i]}" ;;
+    -v)
+      spec="${args[$((i + 1))]}"
+      mounts["${spec#*:}"]="${spec%%:*}"
+      ;;
+    update | augment | upload) mode="${args[$i]}" ;;
     --sbom-in) sbom_in="${args[$((i + 1))]}" ;;
     --sbom-out) sbom_out="${args[$((i + 1))]}" ;;
+    --repo) repo="${args[$((i + 1))]}" ;;
+    --branch) branch="${args[$((i + 1))]}" ;;
+    -c | -ec)
+      next="${args[$((i + 1))]}"
+      case "$next" in
+        *gpgloader*) sign_base=$((i + 2)) ;;
+      esac
+      ;;
   esac
 done
 
-# The actions use container paths: /repo for the checkout and /pwd for the
-# release assets. This script runs on the host, so map them back.
+# The containers use paths such as /repo and /pwd. This script runs on the
+# host, so map each container path back through its -v mount.
 map_path() {
-  case "$1" in
-    /repo/*) printf '%s/%s\n' "$PWD" "${1#/repo/}" ;;
-    /pwd/*) printf '%s/%s\n' "${RELEASE_ASSETS:?RELEASE_ASSETS is not set}" "${1#/pwd/}" ;;
-    *) printf '%s\n' "$1" ;;
-  esac
+  local path=$1
+  local container
+  for container in "${!mounts[@]}"; do
+    if [ "$path" = "$container" ]; then
+      printf '%s\n' "${mounts[$container]}"
+      return
+    fi
+    case "$path" in
+      "$container"/*)
+        printf '%s/%s\n' "${mounts[$container]}" "${path#"$container"/}"
+        return
+        ;;
+    esac
+  done
+  printf '%s\n' "$path"
 }
 
 if [ "$mode" = "update" ]; then
@@ -62,7 +100,32 @@ if [ "$mode" = "augment" ]; then
   exit 0
 fi
 
-# Garasign. The action pipes the file list on stdin.
+if [ "$mode" = "upload" ]; then
+  [ -n "$repo" ] || die "upload has no --repo"
+  [ -n "$branch" ] || die "upload has no --branch"
+  [ -n "$sbom_in" ] || die "upload has no --sbom-in"
+  in_file=$(map_path "$sbom_in")
+  [ -s "$in_file" ] || die "upload SBOM is empty: $in_file"
+  echo "docker stub: would upload $in_file to $repo on branch $branch"
+  exit 0
+fi
+
+sign_count=$(( ${#args[@]} - ${sign_base:-${#args[@]}} ))
+if [ "$sign_count" -ge 3 ]; then
+  out_file=$(map_path "${args[$((sign_base + 1))]}")
+  in_file=$(map_path "${args[$((sign_base + 2))]}")
+  [ -f "$in_file" ] || die "no such artifact: $in_file"
+  mkdir -p "$(dirname "$out_file")"
+  printf 'stub signature for %s\n' "$in_file" >"$out_file"
+  echo "docker stub: wrote placeholder signature $out_file"
+  exit 0
+fi
+
+if [ -n "$sign_base" ] && [ "$sign_count" -ne 0 ]; then
+  die "signing call has no key, output, and input"
+fi
+
+# The GitHub gpg-sign action pipes the file list on stdin.
 count=0
 while IFS= read -r -d '' file; do
   printf 'stub signature for %s\n' "$file" >"$file.sig"
