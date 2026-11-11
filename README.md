@@ -4,6 +4,10 @@ Example Python project that uses
 [abx-release-tools](https://github.com/mongodb-labs/abx-release-tools).
 The project is a demo, not production code.
 
+The release workflows use MongoDB internal release infrastructure:
+Garasign, Kondukto, and the release S3 bucket. They do not run outside
+MongoDB. Use this repo to read how the actions fit together.
+
 The workflows call every action in the tools repo, in the order the
 [documentation](https://github.com/mongodb-labs/abx-release-tools/tree/main/docs)
 gives.
