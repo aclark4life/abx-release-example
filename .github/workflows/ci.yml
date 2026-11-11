@@ -1,0 +1,55 @@
+# Actions are pinned to mongodb-labs/abx-release-tools@9d8e507
+# (2026-11-11). Update the SHA to take a newer version.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install the project
+        run: pip install -e ".[test]"
+      - name: Run the tests
+        run: pytest
+
+  build-and-sbom:
+    name: Build and generate the SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the distributions
+        run: |
+          pip install build
+          python -m build
+      # No AWS access is needed for this action.
+      - uses: mongodb-labs/abx-release-tools/actions/python/generate-sbom@9d8e5070f37497b4d2d0239c80d65eacc096fdbc
+        with:
+          source: requirements
+          source_path: requirements.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-and-sbom
+          path: |
+            dist/
+            sbom.json

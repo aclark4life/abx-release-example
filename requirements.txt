@@ -1,0 +1,2 @@
+# Release dependencies, pinned. The SBOM is generated from this file.
+typing-extensions==4.12.2

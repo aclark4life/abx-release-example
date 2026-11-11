@@ -1,0 +1,105 @@
+# Actions are pinned to mongodb-labs/abx-release-tools@9d8e507
+# (2026-11-11). Update the SHA to take a newer version.
+#
+# This workflow needs the `release` environment, AWS credentials, and a PyPI
+# pending publisher. See the README.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to publish. Must match pyproject.toml.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the distributions
+        run: |
+          pip install build
+          python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  release:
+    name: Sign, trace, and publish
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Set up the release environment. Every action below except
+      # python/publish reads the variables this step writes.
+      - uses: mongodb-labs/abx-release-tools/actions/setup@9d8e5070f37497b4d2d0239c80d65eacc096fdbc
+        with:
+          aws_role_arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws_region_name: ${{ vars.AWS_REGION_NAME }}
+          aws_secret_id: ${{ secrets.AWS_SECRET_ID }}
+
+      # Build sbom.json from the pinned release requirements.
+      - uses: mongodb-labs/abx-release-tools/actions/python/generate-sbom@9d8e5070f37497b4d2d0239c80d65eacc096fdbc
+        with:
+          source: requirements
+          source_path: requirements.txt
+
+      # Augment the SBOM and write cyclonedx.sbom.json to the S3 assets.
+      - uses: mongodb-labs/abx-release-tools/actions/sbom@9d8e5070f37497b4d2d0239c80d65eacc096fdbc
+
+      # Write a detached signature per file and move the .sig files to
+      # RELEASE_ASSETS.
+      - uses: mongodb-labs/abx-release-tools/actions/gpg-sign@9d8e5070f37497b4d2d0239c80d65eacc096fdbc
+        with:
+          filenames: dist/*
+
+      # Write authorized-publication.txt to the S3 assets.
+      - uses: mongodb-labs/abx-release-tools/actions/authorized-pub@9d8e5070f37497b4d2d0239c80d65eacc096fdbc
+        with:
+          product_name: abx-release-example
+          release_version: ${{ inputs.version }}
+          filenames: dist/*
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Upload the report and the augmented SBOM to the release S3 bucket.
+      - uses: mongodb-labs/abx-release-tools/actions/upload-s3-assets@9d8e5070f37497b4d2d0239c80d65eacc096fdbc
+        with:
+          product_name: abx-release-example
+          version: ${{ inputs.version }}
+
+      - name: Keep the signed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-artifacts
+          path: |
+            dist/
+            ${{ runner.temp }}/release-assets/
+
+      # Publish with trusted publishing. No stored PyPI token.
+      - uses: mongodb-labs/abx-release-tools/actions/python/publish@9d8e5070f37497b4d2d0239c80d65eacc096fdbc
+        with:
+          dist_path: dist/

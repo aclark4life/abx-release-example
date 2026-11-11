@@ -1,0 +1,61 @@
+# Actions are pinned to mongodb-labs/abx-release-tools@9d8e507
+# (2026-11-11). Update the SHA to take a newer version.
+#
+# This workflow needs the `release` environment and AWS credentials. See the
+# README.
+name: Sign release tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to sign, for example v0.1.0.
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  sign:
+    name: Sign the tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The tag is interpolated into the git-sign command. Validate it first, so
+      # only characters that cannot form shell syntax reach that command.
+      - name: Validate the tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag must look like v1.2.3"
+            exit 1
+          fi
+
+      - uses: mongodb-labs/abx-release-tools/actions/setup@9d8e5070f37497b4d2d0239c80d65eacc096fdbc
+        with:
+          aws_role_arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws_region_name: ${{ vars.AWS_REGION_NAME }}
+          aws_secret_id: ${{ secrets.AWS_SECRET_ID }}
+
+      # Sign in the Garasign container. The container sets its own git identity,
+      # so the command passes one to git.
+      - uses: mongodb-labs/abx-release-tools/actions/git-sign@9d8e5070f37497b4d2d0239c80d65eacc096fdbc
+        with:
+          command: >-
+            git
+            -c user.name="mongodb-dbx-release-bot[bot]"
+            -c user.email="167856002+mongodb-dbx-release-bot[bot]@users.noreply.github.com"
+            tag -s -f -m "Release ${{ inputs.tag }}" "${{ inputs.tag }}"
+
+      - name: Push the signed tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: git push --force origin "$TAG"
