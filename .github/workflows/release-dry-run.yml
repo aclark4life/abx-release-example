@@ -1,0 +1,117 @@
+# Exercise the release actions without AWS access and without publishing.
+#
+# The `setup` action is simulated: the step below creates the variables and
+# files it would write. The SilkBomb and Garasign containers are replaced by a
+# stub docker (see .github/scripts/docker). The other actions run unchanged.
+#
+# This proves the wiring and the shell logic. It does not prove that the
+# containers, the AWS secret, or the S3 bucket work.
+name: Release dry run
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    name: Dry run
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the distributions
+        run: |
+          pip install build
+          python -m build
+
+      # Make the stub docker the first `docker` on PATH, and create the
+      # environment that the setup action would export.
+      - name: Simulate setup
+        run: |
+          set -euo pipefail
+
+          stub_dir="$RUNNER_TEMP/stub-bin"
+          mkdir -p "$stub_dir"
+          cp .github/scripts/docker "$stub_dir/docker"
+          chmod +x "$stub_dir/docker"
+          echo "$stub_dir" >> "$GITHUB_PATH"
+
+          release_assets="$RUNNER_TEMP/release-assets"
+          s3_assets="$RUNNER_TEMP/s3-assets"
+          mkdir -p "$release_assets" "$s3_assets"
+
+          garasign_envfile="$RUNNER_TEMP/garasign-envfile"
+          printf 'GRS_CONFIG_USER1_USERNAME=stub\nGRS_CONFIG_USER1_PASSWORD=stub\n' > "$garasign_envfile"
+          kondukto_envfile="$RUNNER_TEMP/kondukto-envfile"
+          printf 'KONDUKTO_TOKEN=stub\n' > "$kondukto_envfile"
+
+          {
+            echo "RELEASE_ASSETS=$release_assets"
+            echo "S3_ASSETS=$s3_assets"
+            echo "GARASIGN_ENVFILE=$garasign_envfile"
+            echo "KONDUKTO_ENVFILE=$kondukto_envfile"
+            echo "GPG_KEY_ID=stub-key"
+          } >> "$GITHUB_ENV"
+
+      - uses: mongodb-labs/abx-release-tools/actions/python/generate-sbom@9d8e5070f37497b4d2d0239c80d65eacc096fdbc
+        with:
+          source: requirements
+          source_path: requirements.txt
+
+      - uses: mongodb-labs/abx-release-tools/actions/sbom@9d8e5070f37497b4d2d0239c80d65eacc096fdbc
+
+      - uses: mongodb-labs/abx-release-tools/actions/gpg-sign@9d8e5070f37497b4d2d0239c80d65eacc096fdbc
+        with:
+          filenames: dist/*
+
+      - uses: mongodb-labs/abx-release-tools/actions/authorized-pub@9d8e5070f37497b4d2d0239c80d65eacc096fdbc
+        with:
+          product_name: abx-release-example
+          release_version: 0.1.0
+          filenames: dist/*
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: mongodb-labs/abx-release-tools/actions/upload-s3-assets@9d8e5070f37497b4d2d0239c80d65eacc096fdbc
+        with:
+          product_name: abx-release-example
+          version: 0.1.0
+          dry_run: "true"
+
+      - name: Verify the dry run
+        run: |
+          set -euo pipefail
+
+          test -s sbom.json
+          test -s "$RELEASE_ASSETS/cyclonedx.sbom.json"
+          test -s "$S3_ASSETS/cyclonedx.sbom.json"
+          test -s "$S3_ASSETS/authorized-publication.txt"
+
+          artifacts=$(find dist -maxdepth 1 -type f ! -name '*.sig' | wc -l)
+          signatures=$(find "$RELEASE_ASSETS" -maxdepth 1 -name '*.sig' | wc -l)
+          [ "$artifacts" -eq "$signatures" ]
+
+          grep -q '^Product: abx-release-example$' "$S3_ASSETS/authorized-publication.txt"
+          grep -q '^Version: 0.1.0$' "$S3_ASSETS/authorized-publication.txt"
+
+          {
+            echo "## Dry run passed"
+            echo ""
+            echo "- $artifacts artifact(s), $signatures placeholder signature(s)"
+            echo "- SBOM written to release assets and S3 assets"
+            echo "- Authorized-publication report written"
+            echo "- S3 upload used dry_run"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dry-run-output
+          path: |
+            sbom.json
+            ${{ runner.temp }}/release-assets/
+            ${{ runner.temp }}/s3-assets/

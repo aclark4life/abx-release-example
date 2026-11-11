@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Stub docker for the release dry run. It stands in for the two containers the
+# actions use:
+#
+#   - SilkBomb: `update` copies the input SBOM to the output path. `augment`
+#     checks that the SBOM exists. It does not contact Kondukto.
+#   - Garasign: reads the NUL-delimited file list on stdin and writes a
+#     placeholder `.sig` file for each name. It does not sign anything.
+#
+# Any other container is an error: the dry run must not silently pass a step
+# it cannot simulate.
+set -euo pipefail
+
+die() {
+  echo "docker stub: $*" >&2
+  exit 1
+}
+
+[ "${1:-}" = "run" ] || die "unsupported command: ${1:-}"
+shift
+
+mode=""
+sbom_in=""
+sbom_out=""
+
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    update | augment) mode="${args[$i]}" ;;
+    --sbom-in) sbom_in="${args[$((i + 1))]}" ;;
+    --sbom-out) sbom_out="${args[$((i + 1))]}" ;;
+  esac
+done
+
+# The actions use container paths: /repo for the checkout and /pwd for the
+# release assets. This script runs on the host, so map them back.
+map_path() {
+  case "$1" in
+    /repo/*) printf '%s/%s\n' "$PWD" "${1#/repo/}" ;;
+    /pwd/*) printf '%s/%s\n' "${RELEASE_ASSETS:?RELEASE_ASSETS is not set}" "${1#/pwd/}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+if [ "$mode" = "update" ]; then
+  [ -n "$sbom_in" ] || die "update has no --sbom-in"
+  [ -n "$sbom_out" ] || die "update has no --sbom-out"
+  in_file=$(map_path "$sbom_in")
+  out_file=$(map_path "$sbom_out")
+  [ -s "$in_file" ] || die "input SBOM is empty: $in_file"
+  mkdir -p "$(dirname "$out_file")"
+  cp -- "$in_file" "$out_file"
+  echo "docker stub: update copied $in_file to $out_file"
+  exit 0
+fi
+
+if [ "$mode" = "augment" ]; then
+  [ -n "$sbom_in" ] || die "augment has no --sbom-in"
+  [ -n "$sbom_out" ] || die "augment has no --sbom-out"
+  [ -s "$(map_path "$sbom_out")" ] || die "no SBOM to augment"
+  echo "docker stub: augment left $(map_path "$sbom_out") in place"
+  exit 0
+fi
+
+# Garasign. The action pipes the file list on stdin.
+count=0
+while IFS= read -r -d '' file; do
+  printf 'stub signature for %s\n' "$file" >"$file.sig"
+  count=$((count + 1))
+done
+[ "$count" -gt 0 ] || die "no file names on stdin"
+echo "docker stub: wrote $count placeholder signature(s)"

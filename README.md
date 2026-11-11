@@ -19,6 +19,7 @@ gives.
 | `ci.yml` | Push to `main`, pull request | `python/generate-sbom` | No |
 | `release.yml` | Manual dispatch | `setup`, `python/generate-sbom`, `sbom`, `gpg-sign`, `authorized-pub`, `upload-s3-assets`, `python/publish` | Yes |
 | `sign-tag.yml` | Manual dispatch | `setup`, `git-sign` | Yes |
+| `release-dry-run.yml` | Manual dispatch | `python/generate-sbom`, `sbom`, `gpg-sign`, `authorized-pub`, `upload-s3-assets` with stubs | No |
 
 `ci.yml` runs the tests on Python 3.10 to 3.13, builds the
 distributions, and generates `sbom.json`. It runs without secrets.
@@ -87,6 +88,29 @@ The publish job needs `id-token: write`. The workflow sets it.
    gh workflow run release.yml -f version=0.1.0
    ```
 
+## Dry run
+
+`release-dry-run.yml` tests the release wiring without AWS or PyPI.
+
+It simulates `setup`: the workflow creates the environment variables and
+env files that `setup` writes. It replaces the SilkBomb and Garasign
+containers with a stub `docker` in `.github/scripts/docker`. No SBOM
+service or signing key is used. The other actions run unchanged, and
+`upload-s3-assets` runs with `dry_run: true`.
+
+The workflow checks these outputs:
+
+- `sbom.json` exists.
+- The augmented SBOM reaches the release assets and the S3 assets.
+- Every distribution has a placeholder signature.
+- The authorized-publication report has the product and version.
+
+It does not test `setup`, the real containers, AWS, S3, or publishing.
+
+```shell
+gh workflow run release-dry-run.yml
+```
+
 ## Layout
 
 ```
@@ -94,7 +118,8 @@ src/abx_example/       The package
 tests/                 The tests
 requirements.txt       Pinned release dependencies; the SBOM input
 pyproject.toml         Package metadata
-.github/workflows/     CI, release, and tag signing
+.github/workflows/     CI, release, tag signing, and the dry run
+.github/scripts/docker Stub containers for the dry run
 ```
 
 ## Notes
